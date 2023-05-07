@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,50 +17,30 @@
 #define SERVER_PORT 8888
 #define SERVER_IP "127.0.0.1"
 
-int prompt(int status) {
+char username[128] = "";
+int cfd = -1;
+int is_login = 0;
+
+int prompt() {
   int choice = 0;
-  if (0 == status) {
+  if (!is_login) {
     printf("1.注册\n");
     printf("2.登录\n");
     printf("3.退出\n");
-  } else if (1 == status) {
+  } else if (is_login) {
     printf("1.查词\n");
-    printf("2.历史记录\n");
-    printf("3.退出\n");
+    printf("2.返回上级\n");
   }
   printf("请选择>>> ");
   scanf("%d", &choice);
-  return choice;
+  while (getchar() != '\n')
+    ;
+  return is_login ? choice + 3 : choice;
 }
 
-int signup(int cfd) {
-  char username[128] = "";
-  char password[128] = "";
-  printf("请输入用户名>>> ");
-  scanf("%s", username);
-  printf("请输入密码>>> ");
-  scanf("%s", password);
-  char buf[256] = "";
-  sprintf(buf, "%c%c%s%c%s", 's', '\0', username, '\0', password);
-  if (send(cfd, buf, sizeof(buf), 0) < 0) {
-    ERR_MSG("send");
-    return -1;
-  }
-  bzero(buf, sizeof(buf));
-  ssize_t res = recv(cfd, buf, sizeof(buf), 0);
-  if (res < 0) {
-    ERR_MSG("recv");
-    return -1;
-  } else if (0 == res) {
-    printf("服务器下线\n");
-    return -1;
-  }
-  printf("%s __%d__\n", buf, __LINE__); // TBD: 解析
-  return 0;
-}
-
-int login(int cfd) {
-  char username[128] = {0};
+int login() {
+  if (is_login)
+    return 1;
   char password[128] = {0};
   printf("请输入用户名>>> ");
   scanf("%s", username);
@@ -71,26 +52,143 @@ int login(int cfd) {
     ERR_MSG("send");
     return -1;
   }
-  bzero(buf, sizeof(buf));
-  ssize_t res = recv(cfd, buf, sizeof(buf), 0);
-  if (res < 0) {
-    ERR_MSG("recv");
-    return -1;
-  } else if (0 == res) {
-    printf("服务器下线\n");
-    return -1;
-  }
-  if (buf[0] == 'g') {
-    printf("登录成功\n");
-    return 0;
-  } else {
-    printf("登录失败：%s\n", buf + 2);
-    return 1;
+  // 接收登录结果
+  while (1) {
+    bzero(buf, sizeof(buf));
+    ssize_t res = recv(cfd, buf, sizeof(buf), 0);
+    if (res < 0) {
+      ERR_MSG("recv");
+      return -1;
+    } else if (0 == res) {
+      printf("服务器下线\n");
+      return -1;
+    }
+    if ('g' == buf[0]) {
+      printf("登录成功\n");
+      is_login = 1;
+      return 0;
+    } else if ('e' == buf[0]) {
+      printf("登录失败：%s\n", buf + 2);
+      return 1;
+    } else {
+      continue;
+    }
   }
 }
 
+int signup() {
+  if (is_login)
+    return 1;
+  char password[128] = "";
+  char buf[256] = "";
+  printf("请输入用户名>>> ");
+  scanf("%s", username);
+  printf("请输入密码>>> ");
+  scanf("%s", password);
+  sprintf(buf, "%c%c%s%c%s", 's', '\0', username, '\0', password);
+  if (send(cfd, buf, sizeof(buf), 0) < 0) {
+    ERR_MSG("send");
+    return -1;
+  }
+  // 接收注册结果
+  while (1) {
+    bzero(buf, sizeof(buf));
+    ssize_t res = recv(cfd, buf, sizeof(buf), 0);
+    if (res < 0) {
+      ERR_MSG("recv");
+      return -1;
+    } else if (0 == res) {
+      printf("服务器下线\n");
+      return -1;
+    }
+    if ('g' == buf[0]) {
+      printf("注册成功\n");
+      return 0;
+    } else if ('e' == buf[0]) {
+      printf("注册失败：%s\n", buf + 2);
+      return 1;
+    } else {
+      continue;
+    }
+  }
+}
+
+int query() {
+  if (!is_login)
+    return 1;
+  char buf[1024] = {0};
+  char word[128] = {0};
+  printf("请输入要查询的单词>>> ");
+  scanf("%s", word);
+  sprintf(buf, "%c%c%s", 'q', '\0', word);
+  if (send(cfd, buf, sizeof(buf), 0) < 0) {
+    ERR_MSG("send");
+    return -1;
+  }
+  // 接收查询结果
+  while (1) {
+    bzero(buf, sizeof(buf));
+    ssize_t res = recv(cfd, buf, sizeof(buf), 0);
+    if (res < 0) {
+      ERR_MSG("recv");
+      return -1;
+    } else if (0 == res) {
+      printf("服务器下线\n");
+      return -1;
+    }
+    if ('e' == buf[0]) {
+      printf("查询失败：%s\n", buf + 2);
+      return 1;
+    } else if ('g' == buf[0]) {
+      printf("查询结果：%s\n", buf + 2);
+      return 0;
+    } else {
+      continue;
+    }
+  }
+}
+
+int logout() {
+  if (!is_login)
+    return 1;
+  char buf[1024] = {0};
+  sprintf(buf, "%c%c%s", 'o', '\0', username);
+  if (send(cfd, buf, sizeof(buf), 0) < 0) {
+    ERR_MSG("send");
+    return -1;
+  }
+  // 接收注销结果
+  while (1) {
+    bzero(buf, sizeof(buf));
+    ssize_t res = recv(cfd, buf, sizeof(buf), 0);
+    if (res < 0) {
+      ERR_MSG("recv");
+      return -1;
+    } else if (0 == res) {
+      printf("服务器下线\n");
+      return -1;
+    }
+    if ('g' == buf[0]) {
+      printf("注销成功\n");
+      is_login = 0;
+      return 0;
+    } else if ('e' == buf[0]) {
+      printf("注销失败：%s\n", buf + 2);
+      return 1;
+    } else {
+      continue;
+    }
+  }
+}
+
+void handle_exit(int sig) {
+  logout();
+  exit(0);
+}
+
 int main(int argc, const char *argv[]) {
-  int cfd = socket(AF_INET, SOCK_STREAM, 0);
+  signal(SIGINT, handle_exit);
+  cfd = socket(AF_INET, SOCK_STREAM, 0);
   if (cfd < 0) {
     ERR_MSG("socket");
     return -1;
@@ -107,48 +205,29 @@ int main(int argc, const char *argv[]) {
   }
   printf("connect success\n");
 
-  char buf[128] = "";
-  ssize_t res = 0;
-  int status = 0;
-  int ret;
   while (1) {
-    int choice = prompt(status);
-
-    if (3 == choice)
+    switch (prompt()) {
+    case 1:
+      signup();
       break;
-
-    if (0 == status) {
-      if (1 == choice) // 选择注册
-        if (signup(cfd) < 0)
-          exit(-1);
-      if (2 == choice) { // 选择登录
-        ret = login(cfd);
-        if (ret < 0) exit(-1); // 连接错误
-        if (ret == 0) status = 1; // 登录成功
-        else continue; // 登录失败
-      }
+    case 2:
+      login();
+      break;
+    case 3:
+      logout();
+      exit(0);
+      break;
+    case 4:
+      query();
+      break;
+    case 5:
+      logout();
+      break;
+    default:
+      printf("输入错误\n");
+      break;
     }
-    // printf("请输入>>> ");
-    // fgets(buf, sizeof(buf), stdin);
-    // buf[strlen(buf) - 1] = '\0';
-    // if (send(cfd, buf, sizeof(buf), 0) < 0) {
-    //   ERR_MSG("send");
-    //   return -1;
-    // }
-    // printf("发送成功\n");
-    // bzero(buf, sizeof(buf));
-    // res = recv(cfd, buf, sizeof(buf), 0);
-    // if (res < 0) {
-    //   ERR_MSG("recv");
-    //   return -1;
-    // } else if (0 == res) {
-    //   printf("服务器下线\n");
-    //   break;
-    // }
-    // printf("%s __%d__\n", buf, __LINE__);
   }
-
   close(cfd);
-
   return 0;
 }
