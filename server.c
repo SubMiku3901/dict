@@ -11,15 +11,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define ERR_MSG(msg)                        \
-  do {                                      \
-    fprintf(stderr, "line:%d\n", __LINE__); \
-    perror(msg);                            \
+#define ERR_MSG(msg)                                                           \
+  do {                                                                         \
+    fprintf(stderr, "line:%d\n", __LINE__);                                    \
+    perror(msg);                                                               \
   } while (0)
 
+#define DICT_TXT_FILE_PATH "./dict.txt"
 #define SERVER_PORT 8888
 #define SERVER_IP "127.0.0.1"
-#define DICT_TXT_FILE_PATH "./dict.txt"
 
 /* 传给子线程的结构体，保存客户端连接信息 */
 struct cli_msg {
@@ -89,15 +89,95 @@ void initDatabase(sqlite3 *db) {
   }
 }
 
+/* 发送消息给客户端 */
+int send_msg(char type, char* msg, int newfd) {
+  char buf[1024] = {0};
+  sprintf(buf, "%c%c%s", type, '\0', msg);
+  if (send(newfd, buf, sizeof(buf), 0) < 0) {
+    ERR_MSG("send");
+    return -1;
+  }
+  return 0;
+}
+
+/* 处理客户端注册 */
+void deal_cli_signup_msg(char *msg, sqlite3 *db, int newfd) {
+  char *username = msg + 2;
+  char *password = username + strlen(username) + 1;
+  char query[1024] = {0};
+  int count;
+  // 检查该用户是否已经注册
+  sprintf(query, "SELECT COUNT(*) FROM user WHERE username = \"%s\";",
+          username);
+  if (sqlite3_exec(db, query, callback_count, &count, NULL) != SQLITE_OK) {
+    printf("error on sqlite_exec(): %s\n", sqlite3_errmsg(db));
+    exit(-1);
+  }
+  if (count > 0) { // 已经注册
+    printf("[LOG]: 用户 %s 已经注册\n", username);
+    send_msg('e', "该用户已经注册", newfd);
+    return;
+  }
+  // 将用户信息插入数据库
+  sprintf(query, "INSERT INTO user VALUES (\"%s\", \"%s\", 0);", username,
+          password);
+  if (sqlite3_exec(db, query, NULL, NULL, NULL) != SQLITE_OK) {
+    printf("error on sqlite_exec(): %s\n", sqlite3_errmsg(db));
+    exit(-1);
+  }
+  printf("[LOG]: 用户 %s 注册成功\n", username);
+  send_msg('g', "注册成功", newfd);
+}
+
+/* 处理客户端登入请求 */
+void deal_cli_login_msg(char *msg, sqlite3 *db, int newfd) {
+  char *username = msg + 2;
+  char *password = username + strlen(username) + 1;
+  char query[1024] = {0};
+  int count;
+  // 检查该用户是否已经登入
+  sprintf(query, "SELECT COUNT(*) FROM user WHERE username = \"%s\" AND "
+                 "password = \"%s\" AND is_login = 1;",
+          username, password);
+  if (sqlite3_exec(db, query, callback_count, &count, NULL) != SQLITE_OK) {
+    printf("error on sqlite_exec(): %s\n", sqlite3_errmsg(db));
+    exit(-1);
+  }
+  if (count > 0) { // 已经登入
+    printf("[LOG]: 用户 %s 已经登入\n", username);
+    send_msg('e', "该用户已经登入", newfd);
+    return;
+  }
+  // 检查用户名和密码是否正确
+  sprintf(query, "SELECT COUNT(*) FROM user WHERE username = \"%s\" AND "
+                 "password = \"%s\";",
+          username, password);
+  if (sqlite3_exec(db, query, callback_count, &count, NULL) != SQLITE_OK) {
+    printf("error on sqlite_exec(): %s\n", sqlite3_errmsg(db));
+    exit(-1);
+  }
+  if (count == 0) { // 用户名或密码错误
+    printf("[LOG]: 用户 %s 登入失败\n", username);
+    send_msg('e', "用户名或密码错误", newfd);
+    return;
+  }
+  // 更新用户登入状态
+  sprintf(query, "UPDATE user SET is_login = 1 WHERE username = \"%s\";",
+          username);
+  if (sqlite3_exec(db, query, NULL, NULL, NULL) != SQLITE_OK) {
+    printf("error on sqlite_exec(): %s\n", sqlite3_errmsg(db));
+    exit(-1);
+  }
+  printf("[LOG]: 用户 %s 登入成功\n", username);
+  send_msg('g', "登入成功", newfd);
+}
+
 /* 处理客户端连接 */
-int deal_cli_msg(int newfd, struct sockaddr_in cin) {
-  char buf[128] = "";
+int deal_cli_msg(int newfd, struct sockaddr_in cin, sqlite3 *db) {
+  char buf[1024] = {0};
   ssize_t res = 0;
   while (1) {
-    // 对字符串的操作，操作之前或者之后要清空
-    // 防止之前的数据对这次操作有干扰
     bzero(buf, sizeof(buf));
-    // 接收
     res = recv(newfd, buf, sizeof(buf), 0);
     if (res < 0) {
       ERR_MSG("recv");
@@ -109,13 +189,16 @@ int deal_cli_msg(int newfd, struct sockaddr_in cin) {
     }
     printf("[%s : %d] newfd = %d : %s __%d__\n", inet_ntoa(cin.sin_addr),
            ntohs(cin.sin_port), newfd, buf, __LINE__);
-    // 发送
-    strncat(buf, "*_*", 3);
-    if(send(newfd, buf, sizeof(buf), 0) < 0) {
-      ERR_MSG("send");
-      return -1;
+    switch (buf[0]) {
+      case 's': // 注册
+        deal_cli_signup_msg(buf, db, newfd);
+        break;
+      case 'l': // 登入
+        deal_cli_login_msg(buf, db, newfd);
+        break;
+      default:
+        break;
     }
-    printf("发送成功\n");
   }
   return 0;
 }
@@ -184,12 +267,11 @@ int main(int argc, const char **argv) {
     if (cpid > 0) {
       close(newfd);
     } else if (cpid == 0) {
-        close(server_fd);
-        deal_cli_msg(newfd, client_addr);
-        close(newfd);
-        exit(0);
-      }
-    else {
+      close(server_fd);
+      deal_cli_msg(newfd, client_addr, db);
+      close(newfd);
+      exit(0);
+    } else {
       printf("error on fork(): %s\n", strerror(errno));
       exit(-1);
     }
